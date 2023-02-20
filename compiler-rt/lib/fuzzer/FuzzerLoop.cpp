@@ -21,6 +21,8 @@
 #include <mutex>
 #include <set>
 
+#include "FuzzerDifferential.h"
+
 #if defined(__has_include)
 #if __has_include(<sanitizer / lsan_interface.h>)
 #include <sanitizer/lsan_interface.h>
@@ -44,6 +46,7 @@ bool RunningUserCallback = false;
 
 // Only one Fuzzer per process.
 static Fuzzer *F;
+extern DTManager DTM;
 
 // Leak detection is expensive, so we first check if there were more mallocs
 // than frees (using the sanitizer malloc hooks) and only then try to call lsan.
@@ -519,6 +522,8 @@ bool Fuzzer::RunOne(const uint8_t *Data, size_t Size, bool MayDeleteFile,
   if(!ExecuteCallback(Data, Size)) return false;
   auto TimeOfUnit = duration_cast<microseconds>(UnitStopTime - UnitStartTime);
 
+  std::vector<std::chrono::microseconds> TimesOfUnits = DTM.getTimesOfUnits();
+
   UniqFeatureSetTmp.clear();
   size_t FoundUniqFeaturesOfII = 0;
   size_t NumUpdatesBefore = Corpus.NumFeatureUpdates();
@@ -541,7 +546,7 @@ bool Fuzzer::RunOne(const uint8_t *Data, size_t Size, bool MayDeleteFile,
     auto NewII =
         Corpus.AddToCorpus({Data, Data + Size}, NumNewFeatures, MayDeleteFile,
                            TPC.ObservedFocusFunction(), ForceAddToCorpus,
-                           TimeOfUnit, UniqFeatureSetTmp, DFT, II);
+                           TimeOfUnit, TimesOfUnits, UniqFeatureSetTmp, DFT, II);
     WriteFeatureSetToFile(Options.FeaturesDir, Sha1ToString(NewII->Sha1),
                           NewII->UniqFeatureSet);
     WriteEdgeToMutationGraphFile(Options.MutationGraphFile, NewII, II,
@@ -553,7 +558,7 @@ bool Fuzzer::RunOne(const uint8_t *Data, size_t Size, bool MayDeleteFile,
       FoundUniqFeaturesOfII == II->UniqFeatureSet.size() &&
       II->U.size() > Size) {
     auto OldFeaturesFile = Sha1ToString(II->Sha1);
-    Corpus.Replace(II, {Data, Data + Size}, TimeOfUnit);
+    Corpus.Replace(II, {Data, Data + Size}, TimeOfUnit, TimesOfUnits);
     RenameFeatureSetFile(Options.FeaturesDir, OldFeaturesFile,
                          Sha1ToString(II->Sha1));
     return true;
@@ -857,8 +862,9 @@ void Fuzzer::ReadAndExecuteSeedCorpora(std::vector<SizedFile> &CorporaFiles) {
     // so we add one fake input to the in-memory corpus.
     Corpus.AddToCorpus({'\n'}, /*NumFeatures=*/1, /*MayDeleteFile=*/true,
                        /*HasFocusFunction=*/false, /*NeverReduce=*/false,
-                       /*TimeOfUnit=*/duration_cast<microseconds>(0s), {0}, DFT,
-                       /*BaseII*/ nullptr);
+                       /*TimeOfUnit=*/duration_cast<microseconds>(0s),
+                       /*TimesOfUnits=*/std::vector<std::chrono::microseconds>(),
+                       {0}, DFT, /*BaseII*/ nullptr);
   }
 }
 

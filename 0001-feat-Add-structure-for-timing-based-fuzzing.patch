@@ -1,0 +1,241 @@
+From 688052a30963e8d252c7693750af20705af1b9a1 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Jonas=20M=C3=B6ller?= <jo.moeller@tu-braunschweig.de>
+Date: Tue, 24 Jan 2023 10:55:43 +0100
+Subject: [PATCH] feat: Add structure for timing-based fuzzing
+
+---
+ compiler-rt/lib/fuzzer/FuzzerCorpus.h         | 26 +++++++++-
+ compiler-rt/lib/fuzzer/FuzzerDifferential.cpp | 50 +++++++++++++++++++
+ compiler-rt/lib/fuzzer/FuzzerDifferential.h   | 29 +++++++++++
+ compiler-rt/lib/fuzzer/FuzzerLoop.cpp         | 14 ++++--
+ 4 files changed, 114 insertions(+), 5 deletions(-)
+ create mode 100644 compiler-rt/lib/fuzzer/FuzzerDifferential.cpp
+ create mode 100644 compiler-rt/lib/fuzzer/FuzzerDifferential.h
+
+diff --git a/compiler-rt/lib/fuzzer/FuzzerCorpus.h b/compiler-rt/lib/fuzzer/FuzzerCorpus.h
+index e01891e18..b216eb8bc 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerCorpus.h
++++ b/compiler-rt/lib/fuzzer/FuzzerCorpus.h
+@@ -28,6 +28,7 @@ namespace fuzzer {
+ struct InputInfo {
+   Unit U;  // The actual input data.
+   std::chrono::microseconds TimeOfUnit;
++  std::vector<std::chrono::microseconds> TimesOfUnits;
+   uint8_t Sha1[kSHA1NumBytes];  // Checksum.
+   // Number of features that this input has and no smaller input has.
+   size_t NumFeatures = 0;
+@@ -117,6 +118,25 @@ struct InputInfo {
+ 
+       Energy *= PerfScore;
+     }
++
++    // BOOKMARK Energy assignment
++    // TODO: Create an extra option to enable timing-based fuzzing
++    const bool IS_RUNTIMES = true;
++
++    if (IS_RUNTIMES && TimesOfUnits.size() == 2) {
++      const float epsilon = 0.0000001f;
++      
++      auto delta0 = TimesOfUnits[0].count();
++      auto delta1 = TimesOfUnits[0].count();
++
++      if (delta0 > delta1) {
++        Energy = delta0 / (delta1 + epsilon);
++      } else {
++        Energy = delta1 / (delta0 + epsilon);
++      }
++
++      Energy -= 1 / (1 + epsilon);
++    }
+   }
+ 
+   // Increment the frequency of the feature Idx.
+@@ -209,6 +229,7 @@ public:
+   InputInfo *AddToCorpus(const Unit &U, size_t NumFeatures, bool MayDeleteFile,
+                          bool HasFocusFunction, bool NeverReduce,
+                          std::chrono::microseconds TimeOfUnit,
++                         std::vector<std::chrono::microseconds> TimesOfUnits,
+                          const std::vector<uint32_t> &FeatureSet,
+                          const DataFlowTrace &DFT, const InputInfo *BaseII) {
+     assert(!U.empty());
+@@ -222,6 +243,7 @@ public:
+     II.NumFeatures = NumFeatures;
+     II.NeverReduce = NeverReduce;
+     II.TimeOfUnit = TimeOfUnit;
++    II.TimesOfUnits = TimesOfUnits;
+     II.MayDeleteFile = MayDeleteFile;
+     II.UniqFeatureSet = FeatureSet;
+     II.HasFocusFunction = HasFocusFunction;
+@@ -285,7 +307,8 @@ public:
+   }
+ 
+   void Replace(InputInfo *II, const Unit &U,
+-               std::chrono::microseconds TimeOfUnit) {
++               std::chrono::microseconds TimeOfUnit,
++               std::vector<std::chrono::microseconds> TimesOfUnits) {
+     assert(II->U.size() > U.size());
+     Hashes.erase(Sha1ToString(II->Sha1));
+     DeleteFile(*II);
+@@ -294,6 +317,7 @@ public:
+     II->U = U;
+     II->Reduced = true;
+     II->TimeOfUnit = TimeOfUnit;
++    II->TimesOfUnits = TimesOfUnits;
+     DistributionNeedsUpdate = true;
+   }
+ 
+diff --git a/compiler-rt/lib/fuzzer/FuzzerDifferential.cpp b/compiler-rt/lib/fuzzer/FuzzerDifferential.cpp
+new file mode 100644
+index 000000000..c0c9f51f8
+--- /dev/null
++++ b/compiler-rt/lib/fuzzer/FuzzerDifferential.cpp
+@@ -0,0 +1,50 @@
++#include "FuzzerDifferential.h"
++
++namespace fuzzer {
++  DTManager DTM;
++}
++
++extern "C" {
++void LLVMFuzzerStartBatch(const uint8_t *Data, size_t Size) {
++  fuzzer::DTM.startBatch(Data, Size);
++}
++void LLVMFuzzerEndBatch() { fuzzer::DTM.endBatch(); }
++void LLVMFuzzerStartRun(int i) { fuzzer::DTM.startRun(i); }
++void LLVMFuzzerEndRun(int i, int exit_code, const uint8_t *data, size_t size) {
++  fuzzer::DTM.endRun(i, exit_code, data, size);
++}
++}
++
++namespace fuzzer {
++DTManager::DTManager() {
++}
++
++void DTManager::startBatch(const uint8_t *Data, size_t Size)
++{
++  this->TimesOfUnits.clear();
++  this->counter = 0;
++}
++
++void DTManager::endBatch()
++{
++}
++
++void DTManager::startRun(int i)
++{
++  this->startTime = std::chrono::system_clock::now();
++}
++
++void DTManager::endRun(int i, int exit_code, const uint8_t *data, size_t size)
++{
++  this->endTime = std::chrono::system_clock::now();
++  std::chrono::microseconds delta = std::chrono::duration_cast<std::chrono::microseconds>(this->endTime - this->startTime);
++
++  this->TimesOfUnits.push_back(delta);
++  this->counter++;
++}
++
++std::vector<std::chrono::microseconds> DTManager::getTimesOfUnits() const
++{
++  return this->TimesOfUnits;
++}
++}
+diff --git a/compiler-rt/lib/fuzzer/FuzzerDifferential.h b/compiler-rt/lib/fuzzer/FuzzerDifferential.h
+new file mode 100644
+index 000000000..55fc9ef86
+--- /dev/null
++++ b/compiler-rt/lib/fuzzer/FuzzerDifferential.h
+@@ -0,0 +1,29 @@
++#ifndef LLVM_FUZZER_DIFFERENTIAL_TIMER
++#define LLVM_FUZZER_DIFFERENTIAL_TIMER
++
++#include <cstdlib>
++#include <vector>
++#include <chrono>
++
++namespace fuzzer {
++class DTManager {
++public:
++    DTManager();
++    DTManager(const DTManager&) = delete;
++
++    void startBatch(const uint8_t *Data, size_t Size);
++    void endBatch();
++    void startRun(int i);
++    void endRun(int i, int exit_code, const uint8_t *data, size_t size);
++
++    std::vector<std::chrono::microseconds> getTimesOfUnits() const;
++
++private:
++    int counter = 0;
++    std::vector<std::chrono::microseconds> TimesOfUnits;
++    std::chrono::time_point<std::chrono::system_clock> startTime;
++    std::chrono::time_point<std::chrono::system_clock> endTime;
++};
++}
++
++#endif
+\ No newline at end of file
+diff --git a/compiler-rt/lib/fuzzer/FuzzerLoop.cpp b/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
+index 00f5ed774..eea9e1308 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
++++ b/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
+@@ -21,6 +21,8 @@
+ #include <mutex>
+ #include <set>
+ 
++#include "FuzzerDifferential.h"
++
+ #if defined(__has_include)
+ #if __has_include(<sanitizer / lsan_interface.h>)
+ #include <sanitizer/lsan_interface.h>
+@@ -44,6 +46,7 @@ bool RunningUserCallback = false;
+ 
+ // Only one Fuzzer per process.
+ static Fuzzer *F;
++extern DTManager DTM;
+ 
+ // Leak detection is expensive, so we first check if there were more mallocs
+ // than frees (using the sanitizer malloc hooks) and only then try to call lsan.
+@@ -519,6 +522,8 @@ bool Fuzzer::RunOne(const uint8_t *Data, size_t Size, bool MayDeleteFile,
+   if(!ExecuteCallback(Data, Size)) return false;
+   auto TimeOfUnit = duration_cast<microseconds>(UnitStopTime - UnitStartTime);
+ 
++  std::vector<std::chrono::microseconds> TimesOfUnits = DTM.getTimesOfUnits();
++
+   UniqFeatureSetTmp.clear();
+   size_t FoundUniqFeaturesOfII = 0;
+   size_t NumUpdatesBefore = Corpus.NumFeatureUpdates();
+@@ -541,7 +546,7 @@ bool Fuzzer::RunOne(const uint8_t *Data, size_t Size, bool MayDeleteFile,
+     auto NewII =
+         Corpus.AddToCorpus({Data, Data + Size}, NumNewFeatures, MayDeleteFile,
+                            TPC.ObservedFocusFunction(), ForceAddToCorpus,
+-                           TimeOfUnit, UniqFeatureSetTmp, DFT, II);
++                           TimeOfUnit, TimesOfUnits, UniqFeatureSetTmp, DFT, II);
+     WriteFeatureSetToFile(Options.FeaturesDir, Sha1ToString(NewII->Sha1),
+                           NewII->UniqFeatureSet);
+     WriteEdgeToMutationGraphFile(Options.MutationGraphFile, NewII, II,
+@@ -553,7 +558,7 @@ bool Fuzzer::RunOne(const uint8_t *Data, size_t Size, bool MayDeleteFile,
+       FoundUniqFeaturesOfII == II->UniqFeatureSet.size() &&
+       II->U.size() > Size) {
+     auto OldFeaturesFile = Sha1ToString(II->Sha1);
+-    Corpus.Replace(II, {Data, Data + Size}, TimeOfUnit);
++    Corpus.Replace(II, {Data, Data + Size}, TimeOfUnit, TimesOfUnits);
+     RenameFeatureSetFile(Options.FeaturesDir, OldFeaturesFile,
+                          Sha1ToString(II->Sha1));
+     return true;
+@@ -857,8 +862,9 @@ void Fuzzer::ReadAndExecuteSeedCorpora(std::vector<SizedFile> &CorporaFiles) {
+     // so we add one fake input to the in-memory corpus.
+     Corpus.AddToCorpus({'\n'}, /*NumFeatures=*/1, /*MayDeleteFile=*/true,
+                        /*HasFocusFunction=*/false, /*NeverReduce=*/false,
+-                       /*TimeOfUnit=*/duration_cast<microseconds>(0s), {0}, DFT,
+-                       /*BaseII*/ nullptr);
++                       /*TimeOfUnit=*/duration_cast<microseconds>(0s),
++                       /*TimesOfUnits=*/std::vector<std::chrono::microseconds>(),
++                       {0}, DFT, /*BaseII*/ nullptr);
+   }
+ }
+ 
+-- 
+2.39.0
+

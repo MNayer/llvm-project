@@ -28,6 +28,7 @@ namespace fuzzer {
 struct InputInfo {
   Unit U;  // The actual input data.
   std::chrono::microseconds TimeOfUnit;
+  std::vector<std::chrono::microseconds> TimesOfUnits;
   uint8_t Sha1[kSHA1NumBytes];  // Checksum.
   // Number of features that this input has and no smaller input has.
   size_t NumFeatures = 0;
@@ -116,6 +117,25 @@ struct InputInfo {
         PerfScore = 150;
 
       Energy *= PerfScore;
+    }
+
+    // BOOKMARK Energy assignment
+    // TODO: Create an extra option to enable timing-based fuzzing
+    const bool IS_RUNTIMES = true;
+
+    if (IS_RUNTIMES && TimesOfUnits.size() == 2) {
+      const float epsilon = 0.0000001f;
+      
+      auto delta0 = TimesOfUnits[0].count();
+      auto delta1 = TimesOfUnits[0].count();
+
+      if (delta0 > delta1) {
+        Energy = delta0 / (delta1 + epsilon);
+      } else {
+        Energy = delta1 / (delta0 + epsilon);
+      }
+
+      Energy -= 1 / (1 + epsilon);
     }
   }
 
@@ -209,6 +229,7 @@ public:
   InputInfo *AddToCorpus(const Unit &U, size_t NumFeatures, bool MayDeleteFile,
                          bool HasFocusFunction, bool NeverReduce,
                          std::chrono::microseconds TimeOfUnit,
+                         std::vector<std::chrono::microseconds> TimesOfUnits,
                          const std::vector<uint32_t> &FeatureSet,
                          const DataFlowTrace &DFT, const InputInfo *BaseII) {
     assert(!U.empty());
@@ -222,6 +243,7 @@ public:
     II.NumFeatures = NumFeatures;
     II.NeverReduce = NeverReduce;
     II.TimeOfUnit = TimeOfUnit;
+    II.TimesOfUnits = TimesOfUnits;
     II.MayDeleteFile = MayDeleteFile;
     II.UniqFeatureSet = FeatureSet;
     II.HasFocusFunction = HasFocusFunction;
@@ -285,7 +307,8 @@ public:
   }
 
   void Replace(InputInfo *II, const Unit &U,
-               std::chrono::microseconds TimeOfUnit) {
+               std::chrono::microseconds TimeOfUnit,
+               std::vector<std::chrono::microseconds> TimesOfUnits) {
     assert(II->U.size() > U.size());
     Hashes.erase(Sha1ToString(II->Sha1));
     DeleteFile(*II);
@@ -294,6 +317,7 @@ public:
     II->U = U;
     II->Reduced = true;
     II->TimeOfUnit = TimeOfUnit;
+    II->TimesOfUnits = TimesOfUnits;
     DistributionNeedsUpdate = true;
   }
 
