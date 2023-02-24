@@ -123,19 +123,55 @@ struct InputInfo {
     // TODO: Create an extra option to enable timing-based fuzzing
     const bool IS_RUNTIMES = true;
 
-    if (IS_RUNTIMES && TimesOfUnits.size() == 2) {
+	if (IS_RUNTIMES && TimesOfUnits.size() == 2) {
       const float epsilon = 0.0000001f;
-      
-      auto delta0 = TimesOfUnits[0].count();
-      auto delta1 = TimesOfUnits[0].count();
 
-      if (delta0 > delta1) {
-        Energy = delta0 / (delta1 + epsilon);
-      } else {
-        Energy = delta1 / (delta0 + epsilon);
+      auto delta0 = TimesOfUnits[0].count();
+      auto delta1 = TimesOfUnits[1].count();
+      double delta;
+      static double MaxDelta = -1e6;
+      static double MaxDeltaEnergy = 0.;
+      std::cout << delta0 << std::endl;
+      std::cout << delta1 << std::endl;
+
+      // Flags (to be mapped to the CLI)
+      int Target = 1; // The one which is supposed to become slow compared to the other testee.
+      std::string path("/tmp/slow");
+
+      switch(Target) {
+        case 1:
+	      delta = delta0 - delta1;
+          break;
+        case 2:
+	      delta = delta1 - delta0;
+          break;
+		default:
+          break;
+
+      }
+      double MidPoint = MaxDelta;
+      double Supremum = 1.0; // Hyper-parameter
+      double GrowthRate = 1.0; // Maybe simmulated annealing
+      double Lift = 1.0; // Hyper-parameter
+      Energy *= (Supremum / (1 + exp(-GrowthRate * (delta - MidPoint)))) + Lift; // Use fast logistic function with cutoff-values instead
+
+      // Update MaxDelta
+      if (delta > MaxDelta) {
+        MaxDelta = delta;
+		MaxDeltaEnergy = Energy;
+		WriteToFile(U, path);
       }
 
-      Energy -= 1 / (1 + epsilon);
+      // Logging
+      static int count = 0;
+      static double cumdelta = 0.;
+      count += 1;
+      cumdelta += delta;
+      std::cout << "NOTE delta: " << delta << std::endl;
+      std::cout << "NOTE Avg. delta: " << cumdelta / count << std::endl;
+      std::cout << "NOTE MaxDelta: " << MaxDelta << std::endl;
+      std::cout << "NOTE MaxDeltaEnergy: " << MaxDeltaEnergy << std::endl;
+      std::cout << "NOTE Energy: " << Energy << std::endl;
     }
   }
 
